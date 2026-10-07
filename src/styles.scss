@@ -379,6 +379,14 @@ main {
   background: #c92734;
 }
 
+.legend-actual {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: #2563eb;
+  transform: rotate(45deg);
+}
+
 .graph-panel__footer {
   border-top: 1px solid #e1e7ee;
   border-bottom: 0;
@@ -449,6 +457,67 @@ main {
 .import-template {
   display: flex;
   justify-content: space-between;
+  margin-top: 12px;
+}
+
+.differences-dialog p {
+  margin-top: 0;
+  color: #5d6d80;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.differences-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.differences-table th,
+.differences-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #e6ebf1;
+  text-align: left;
+}
+
+.differences-table th {
+  color: #6b7a8d;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.differences-table td strong {
+  color: #243c55;
+}
+
+.differences-table td small {
+  color: #8494a6;
+  font-size: 10px;
+}
+
+.diff-times {
+  color: #344b63;
+  font-variant-numeric: tabular-nums;
+}
+
+.diff-reason {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 3px;
+  background: #fdf3e3;
+  color: #9a5b00;
+  font-size: 10px;
+}
+
+.diff-winner {
+  color: #138a63;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.differences-dialog__footer {
+  display: flex;
+  justify-content: flex-end;
   margin-top: 12px;
 }
 

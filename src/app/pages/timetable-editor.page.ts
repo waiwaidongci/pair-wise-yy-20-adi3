@@ -24,24 +24,34 @@ import { TrainInspectorComponent } from '../components/train-inspector.component
 import {
   addNotice,
   batchShift,
+  clearAllActualDifferences,
   clearBatchSelection,
+  dismissActualDifference,
   importNetwork,
   moveTrain,
   resetViewport,
   restorePersistedState,
+  retryOnePendingReport,
+  retryPendingReports,
   selectTrain,
   setPrintSection,
+  submitActualReport,
   updateFilter,
   updateTrainStop,
   updateViewport,
 } from '../stores/timetable.actions';
 import {
+  selectActualDifferenceCount,
+  selectActualDifferences,
   selectBatchSelection,
   selectConflictSummary,
   selectConflicts,
   selectFilter,
   selectNetwork,
+  selectNextBatch,
   selectNotices,
+  selectPendingCount,
+  selectPendingReports,
   selectPrintSectionId,
   selectSelectedTrainId,
   selectSelectedConflicts,
@@ -175,6 +185,28 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
             <span>越行风险</span>
             <strong>{{ vm.summary.overtake }}</strong>
           </div>
+          <div class="summary-item" *ngIf="vm.pendingCount > 0">
+            <i class="pi pi-cloud-upload"></i>
+            <span>待补交</span>
+            <strong class="warning">{{ vm.pendingCount }}</strong>
+            <p-button
+              label="一键补交"
+              size="small"
+              severity="secondary"
+              (onClick)="retryAll()"
+            ></p-button>
+          </div>
+          <div class="summary-item" *ngIf="vm.differenceCount > 0">
+            <i class="pi pi-exclamation-circle"></i>
+            <span>差异待核对</span>
+            <strong>{{ vm.differenceCount }}</strong>
+            <p-button
+              label="查看"
+              size="small"
+              severity="secondary"
+              (onClick)="differencesDialog = true"
+            ></p-button>
+          </div>
           <div class="summary-bar__spacer"></div>
           <div class="batch-control">
             <span>批量平移</span>
@@ -226,8 +258,12 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
             <app-train-inspector
               [train]="vm.selectedTrain"
               [stations]="vm.network.stations"
+              [pendingReports]="vm.pendingReports"
+              [differences]="vm.differences"
               (trainShifted)="shiftSelected($event, vm.selectedTrain?.id || null)"
               (stopUpdated)="updateStop($event, vm.selectedTrain?.id || null)"
+              (actualSubmitted)="submitActual($event)"
+              (pendingRetried)="retryPending($event)"
             ></app-train-inspector>
           </aside>
 
@@ -238,7 +274,8 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
                 <span>红色区间表示正在违反安全间隔</span>
               </div>
               <div class="legend">
-                <span><i class="legend-line"></i>运行线</span>
+                <span><i class="legend-line"></i>计划运行线</span>
+                <span><i class="legend-actual"></i>实绩点</span>
                 <span><i class="legend-stop"></i>停站</span>
                 <span><i class="legend-danger"></i>冲突</span>
               </div>
@@ -251,6 +288,7 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
               [selectedTrainId]="vm.selectedTrainId"
               [batchSelection]="vm.batchSelection"
               [printSectionId]="vm.printSectionId"
+              [useActualBasis]="!!vm.printSectionId"
               (trainSelected)="selectTrainAction($event)"
               (trainMoved)="moveTrainAction($event)"
               (viewportChanged)="updateViewportAction($event)"
@@ -309,6 +347,64 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
           <p-button label="取消" severity="secondary" (onClick)="importDialog = false"></p-button>
         </ng-template>
       </p-dialog>
+
+      <p-dialog
+        header="实绩上报差异核对"
+        [(visible)]="differencesDialog"
+        [modal]="true"
+        [style]="{ width: '640px' }"
+        [draggable]="false"
+      >
+        <div class="differences-dialog">
+          <p>
+            两位值班员对同一车次同一车站提交实绩时，先到的批次生效，后到的差异保留在此核对；晚到的旧批次不会回退已确认的实绩。
+          </p>
+          <table class="differences-table">
+            <thead>
+              <tr>
+                <th>车次</th>
+                <th>车站</th>
+                <th>未生效上报</th>
+                <th>原因</th>
+                <th>维持批次</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr *ngFor="let diff of (viewModel$ | async)?.differences">
+                <td><strong>{{ trainNumber(diff.trainId) }}</strong></td>
+                <td>{{ stationName(diff.stationId) }}</td>
+                <td>
+                  <div class="diff-times">
+                    {{ formatTime(diff.loserActualArrival) }} → {{ formatTime(diff.loserActualDeparture) }}
+                  </div>
+                  <small>{{ diff.loserReporter }} · 第 {{ diff.loserBatch }} 批</small>
+                </td>
+                <td>
+                  <span class="diff-reason">
+                    {{ diff.reason === 'duplicate' ? '同批次重复' : '旧批次迟到' }}
+                  </span>
+                </td>
+                <td><span class="diff-winner">第 {{ diff.winnerBatch }} 批</span></td>
+                <td>
+                  <p-button
+                    icon="pi pi-times"
+                    size="small"
+                    [text]="true"
+                    (onClick)="dismissDifference(diff.id)"
+                  ></p-button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="differences-dialog__footer" *ngIf="(viewModel$ | async)?.differences?.length">
+            <p-button label="全部清空" size="small" severity="secondary" (onClick)="clearAllDifferences()"></p-button>
+          </div>
+        </div>
+        <ng-template pTemplate="footer">
+          <p-button label="关闭" severity="secondary" (onClick)="differencesDialog = false"></p-button>
+        </ng-template>
+      </p-dialog>
     </ng-container>
   `,
 })
@@ -332,6 +428,7 @@ export class TimetableEditorPageComponent implements OnInit {
   batchMinutes = 5;
   printSectionId: string | null = null;
   importDialog = false;
+  differencesDialog = false;
 
   readonly viewModel$ = combineLatest({
     network: this.store.select(selectNetwork),
@@ -346,6 +443,10 @@ export class TimetableEditorPageComponent implements OnInit {
     summary: this.store.select(selectConflictSummary),
     printSectionId: this.store.select(selectPrintSectionId),
     notices: this.store.select(selectNotices),
+    pendingReports: this.store.select(selectPendingReports),
+    pendingCount: this.store.select(selectPendingCount),
+    differences: this.store.select(selectActualDifferences),
+    differenceCount: this.store.select(selectActualDifferenceCount),
   }).pipe(map((state) => state));
 
   ngOnInit(): void {
@@ -432,6 +533,51 @@ export class TimetableEditorPageComponent implements OnInit {
     );
   }
 
+  /** 值班员提交实绩：批次号取该站已上报批次 + 1，先到生效、旧批次不回退。 */
+  submitActual(event: {
+    trainId: string;
+    stationId: string;
+    actualArrival: number;
+    actualDeparture: number;
+    reporter: string;
+  }): void {
+    let batch = 1;
+    this.store
+      .select(selectNextBatch(event.trainId, event.stationId))
+      .subscribe((value) => (batch = value))
+      .unsubscribe();
+    this.store.dispatch(
+      submitActualReport({
+        record: {
+          trainId: event.trainId,
+          stationId: event.stationId,
+          actualArrival: event.actualArrival,
+          actualDeparture: event.actualDeparture,
+          batch,
+          reporter: event.reporter,
+          reportedAt: new Date().toISOString(),
+        },
+      }),
+    );
+  }
+
+  retryPending(id: string): void {
+    this.store.dispatch(retryOnePendingReport({ id }));
+  }
+
+  retryAll(): void {
+    this.store.dispatch(retryPendingReports());
+  }
+
+  dismissDifference(id: string): void {
+    this.store.dispatch(dismissActualDifference({ id }));
+  }
+
+  clearAllDifferences(): void {
+    this.store.dispatch(clearAllActualDifferences());
+    this.differencesDialog = false;
+  }
+
   toggleBatch(trainId: string): void {
     this.store.dispatch({ type: '[Timetable] Toggle batch train', trainId });
   }
@@ -482,5 +628,27 @@ export class TimetableEditorPageComponent implements OnInit {
 
   formatTime(value: number): string {
     return formatTime(value);
+  }
+
+  trainNumber(trainId: string): string {
+    let number = trainId;
+    this.store
+      .select(selectNetwork)
+      .subscribe((network) => {
+        number = network.trains.find((train) => train.id === trainId)?.number ?? trainId;
+      })
+      .unsubscribe();
+    return number;
+  }
+
+  stationName(stationId: string): string {
+    let name = stationId;
+    this.store
+      .select(selectNetwork)
+      .subscribe((network) => {
+        name = network.stations.find((station) => station.id === stationId)?.name ?? stationId;
+      })
+      .unsubscribe();
+    return name;
   }
 }

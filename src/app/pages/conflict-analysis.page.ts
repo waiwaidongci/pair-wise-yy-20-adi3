@@ -6,6 +6,7 @@ import { ButtonModule } from 'primeng/button';
 import { SelectModule } from 'primeng/select';
 import { TableModule } from 'primeng/table';
 import { TagModule } from 'primeng/tag';
+import { TooltipModule } from 'primeng/tooltip';
 import { combineLatest, map } from 'rxjs';
 import { selectConflicts, selectNetwork } from '../stores/timetable.selectors';
 import { ConflictType, TimetableConflict } from '../types/timetable';
@@ -14,7 +15,7 @@ import { formatTime } from '../utils/time';
 @Component({
   selector: 'app-conflict-analysis',
   standalone: true,
-  imports: [CommonModule, FormsModule, ButtonModule, SelectModule, TableModule, TagModule],
+  imports: [CommonModule, FormsModule, ButtonModule, SelectModule, TableModule, TagModule, TooltipModule],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section class="analysis-page" *ngIf="viewModel$ | async as vm">
@@ -22,7 +23,9 @@ import { formatTime } from '../utils/time';
         <div>
           <span>安全分析中心</span>
           <h1>冲突明细与调整窗口</h1>
-          <p>按具体区间、车站和列车列出冲突原因，并给出可执行的时间调整范围。</p>
+          <p>
+            按具体区间、车站和列车列出冲突原因，并给出可执行的时间调整范围。已登记实绩的车站按实际到发时刻计算，未上报按计划时刻兼容显示。
+          </p>
         </div>
         <div class="analysis-kpis">
           <div><small>严重</small><strong class="danger">{{ vm.danger }}</strong></div>
@@ -59,6 +62,7 @@ import { formatTime } from '../utils/time';
           <tr>
             <th>等级</th>
             <th>类型</th>
+            <th>口径</th>
             <th>位置</th>
             <th>冲突说明</th>
             <th>时间范围</th>
@@ -75,6 +79,17 @@ import { formatTime } from '../utils/time';
             </td>
             <td>{{ typeLabel(conflict.type) }}</td>
             <td>
+              <p-tag
+                [value]="conflict.basis === 'actual' ? '实绩' : '计划'"
+                [severity]="conflict.basis === 'actual' ? 'success' : 'secondary'"
+                [pTooltip]="
+                  conflict.basis === 'actual'
+                    ? '相关车站已上报实绩，按实际到发时刻计算'
+                    : '相关车站未上报实绩，按计划时刻兼容计算'
+                "
+              ></p-tag>
+            </td>
+            <td>
               <strong>{{ location(conflict, vm.network.stations, vm.network.sections) }}</strong>
             </td>
             <td class="detail-cell">{{ conflict.detail }}</td>
@@ -86,7 +101,7 @@ import { formatTime } from '../utils/time';
         </ng-template>
         <ng-template pTemplate="emptymessage">
           <tr>
-            <td colspan="6">当前没有冲突记录。</td>
+            <td colspan="7">当前没有冲突记录。</td>
           </tr>
         </ng-template>
       </p-table>
@@ -159,10 +174,11 @@ export class ConflictAnalysisPageComponent {
   }
 
   exportCsv(conflicts: TimetableConflict[]): void {
-    const header = ['等级', '类型', '列车', '位置', '原因', '建议开始分钟', '建议结束分钟'];
+    const header = ['等级', '类型', '口径', '列车', '位置', '原因', '建议开始分钟', '建议结束分钟'];
     const lines = conflicts.map((conflict) => [
       conflict.severity,
       this.typeLabel(conflict.type),
+      conflict.basis === 'actual' ? '实绩' : '计划',
       conflict.trainIds.join(' / '),
       conflict.sectionId ?? conflict.stationId ?? '',
       conflict.detail.replaceAll(',', '，'),

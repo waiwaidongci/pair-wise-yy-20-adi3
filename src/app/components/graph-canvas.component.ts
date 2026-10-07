@@ -21,7 +21,7 @@ import {
   ViewportState,
 } from '../types/timetable';
 import { formatTime } from '../utils/time';
-import { computeConflicts, visibleTimeRange } from '../utils/timetable-utils';
+import { computeConflicts, effectiveTimes, visibleTimeRange } from '../utils/timetable-utils';
 
 interface Point {
   x: number;
@@ -121,6 +121,8 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
   @Input() selectedTrainId: string | null = null;
   @Input() batchSelection: string[] = [];
   @Input() printSectionId: string | null = null;
+  /** 实绩口径：打印时按实际到发绘制运行线；编辑时按计划绘制并叠加实绩点。 */
+  @Input() useActualBasis = false;
 
   @Output() trainSelected = new EventEmitter<string>();
   @Output() trainMoved = new EventEmitter<{ trainId: string; deltaMinutes: number }>();
@@ -290,7 +292,10 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
           const times = this.network.trains.flatMap((train) => {
             const fromStop = train.stops.find((stop) => stop.stationId === from.id);
             const toStop = train.stops.find((stop) => stop.stationId === to.id);
-            return fromStop && toStop ? [fromStop.departure, toStop.arrival] : [];
+            if (!fromStop || !toStop) return [];
+            const fromTimes = this.stopTimes(fromStop);
+            const toTimes = this.stopTimes(toStop);
+            return [fromTimes.departure, toTimes.arrival];
           });
           if (times.length > 0) {
             minTime = Math.min(...times) - 4;
@@ -468,18 +473,20 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
         if (!stop || !next) continue;
         const section = this.findSection(stop.stationId, next.stationId);
         if (!section) continue;
+        const stopTimes = this.stopTimes(stop);
+        const nextTimes = this.stopTimes(next);
         const key = `${section.id}:${train.direction}`;
         const bucket = segmentIndex.get(key) ?? [];
         bucket.push({
           train,
           departure:
             train.id === this.draggingTrainId
-              ? Math.min(stop.departure, next.arrival) + this.dragDelta
-              : Math.min(stop.departure, next.arrival),
+              ? Math.min(stopTimes.departure, nextTimes.arrival) + this.dragDelta
+              : Math.min(stopTimes.departure, nextTimes.arrival),
           arrival:
             train.id === this.draggingTrainId
-              ? Math.max(stop.departure, next.arrival) + this.dragDelta
-              : Math.max(stop.departure, next.arrival),
+              ? Math.max(stopTimes.departure, nextTimes.arrival) + this.dragDelta
+              : Math.max(stopTimes.departure, nextTimes.arrival),
         });
         segmentIndex.set(key, bucket);
       }
@@ -500,7 +507,11 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
         if (!next) return;
         const section = this.findSection(stop.stationId, next.stationId);
         if (!section) return;
-        const departure = Math.min(stop.departure, next.arrival) + (train.id === this.draggingTrainId ? this.dragDelta : 0);
+        const stopTimes = this.stopTimes(stop);
+        const nextTimes = this.stopTimes(next);
+        const departure =
+          Math.min(stopTimes.departure, nextTimes.arrival) +
+          (train.id === this.draggingTrainId ? this.dragDelta : 0);
         const peers = segmentIndex.get(`${section.id}:${train.direction}`) ?? [];
         if (peers.some((peer) => peer.train.id !== train.id && Math.abs(peer.departure - departure) < section.minHeadwayMin)) {
           trainSegmentConflicts.add(section.id);
@@ -536,6 +547,11 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
         context.stroke();
       });
     });
+
+    // 编辑模式：在计划运行线上叠加实绩点（菱形），已上报车站一目了然。
+    if (!this.useActualBasis) {
+      this.drawActualOverlays(context, geometry);
+    }
 
     const drawnLabels = new Set<string>();
     this.trains.forEach((train) => {
@@ -584,34 +600,89 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
     train.stops.forEach((stop, index) => {
       const station = stationMap.get(stop.stationId);
       if (!station) return;
+      const times = this.stopTimes(stop);
       const previous = train.stops[index - 1];
       const previousStation = previous ? stationMap.get(previous.stationId) : null;
       if (previousStation) {
         const arrivalPoint = {
-          x: this.timeToX(stop.arrival + delta, geometry),
+          x: this.timeToX(times.arrival + delta, geometry),
           y: this.kmToY(station.km, geometry),
-          time: stop.arrival + delta,
+          time: times.arrival + delta,
           km: station.km,
         };
         points.push(arrivalPoint);
       } else {
         points.push({
-          x: this.timeToX(stop.arrival + delta, geometry),
+          x: this.timeToX(times.arrival + delta, geometry),
           y: this.kmToY(station.km, geometry),
-          time: stop.arrival + delta,
+          time: times.arrival + delta,
           km: station.km,
         });
       }
-      if (stop.kind !== 'pass' && Math.abs(stop.departure - stop.arrival) > 0.01) {
+      if (stop.kind !== 'pass' && Math.abs(times.departure - times.arrival) > 0.01) {
         points.push({
-          x: this.timeToX(stop.departure + delta, geometry),
+          x: this.timeToX(times.departure + delta, geometry),
           y: this.kmToY(station.km, geometry),
-          time: stop.departure + delta,
+          time: times.departure + delta,
           km: station.km,
         });
       }
     });
     return points;
+  }
+
+  /** 打印（实绩口径）用实际到发；编辑用计划时刻。 */
+  private stopTimes(stop: TrainStop): { arrival: number; departure: number; reported: boolean } {
+    if (!this.useActualBasis) {
+      return { arrival: stop.arrival, departure: stop.departure, reported: false };
+    }
+    return effectiveTimes(stop);
+  }
+
+  /** 编辑模式下叠加实绩点：实际到达/实际发车用菱形标在计划运行线上。 */
+  private drawActualOverlays(
+    context: CanvasRenderingContext2D,
+    geometry: ReturnType<GraphCanvasComponent['getGeometry']>,
+  ): void {
+    const stationMap = new Map(this.network.stations.map((station) => [station.id, station]));
+    this.trains.forEach((train) => {
+      train.stops.forEach((stop) => {
+        if (stop.actualArrival == null && stop.actualDeparture == null) return;
+        const station = stationMap.get(stop.stationId);
+        if (!station) return;
+        const y = this.kmToY(station.km, geometry);
+        const arrivalX = this.timeToX(stop.actualArrival ?? stop.arrival, geometry);
+        this.drawActualMarker(context, arrivalX, y, train.color);
+        if (
+          stop.actualDeparture != null &&
+          Math.abs(stop.actualDeparture - (stop.actualArrival ?? stop.arrival)) > 0.01
+        ) {
+          const departureX = this.timeToX(stop.actualDeparture, geometry);
+          this.drawActualMarker(context, departureX, y, train.color);
+        }
+      });
+    });
+  }
+
+  private drawActualMarker(
+    context: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    color: string,
+  ): void {
+    context.save();
+    context.beginPath();
+    context.moveTo(x, y - 4.5);
+    context.lineTo(x + 4.5, y);
+    context.lineTo(x, y + 4.5);
+    context.lineTo(x - 4.5, y);
+    context.closePath();
+    context.fillStyle = color;
+    context.fill();
+    context.lineWidth = 1.2;
+    context.strokeStyle = '#ffffff';
+    context.stroke();
+    context.restore();
   }
 
   private drawAxis(
@@ -632,7 +703,11 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
     context.font = '11px "Noto Sans SC", sans-serif';
     context.textAlign = 'right';
     context.fillStyle = '#667085';
-    context.fillText(`追踪间隔 ≥ ${section.minHeadwayMin} 分 · ${section.distanceKm.toFixed(1)} km`, width - 28, 26);
+    context.fillText(
+      `实绩口径 · 追踪间隔 ≥ ${section.minHeadwayMin} 分 · ${section.distanceKm.toFixed(1)} km`,
+      width - 28,
+      26,
+    );
     context.textAlign = 'left';
     context.fillText('铁路调度运行图系统 · 打印件', 24, height - 9);
   }

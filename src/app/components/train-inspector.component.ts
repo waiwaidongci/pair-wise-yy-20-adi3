@@ -5,13 +5,29 @@ import { ButtonModule } from 'primeng/button';
 import { InputNumberModule } from 'primeng/inputnumber';
 import { SelectModule } from 'primeng/select';
 import { TooltipModule } from 'primeng/tooltip';
-import { Station, StopKind, Train, TrainStop } from '../types/timetable';
+import {
+  ActualDifference,
+  PendingActualReport,
+  Station,
+  StopKind,
+  Train,
+  TrainStop,
+} from '../types/timetable';
 import { formatDuration, formatTime } from '../utils/time';
+import { ActualReportFormComponent } from './actual-report-form.component';
 
 @Component({
   selector: 'app-train-inspector',
   standalone: true,
-  imports: [CommonModule, FormsModule, ButtonModule, InputNumberModule, SelectModule, TooltipModule],
+  imports: [
+    CommonModule,
+    FormsModule,
+    ButtonModule,
+    InputNumberModule,
+    SelectModule,
+    TooltipModule,
+    ActualReportFormComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section class="panel inspector" *ngIf="train; else noTrain">
@@ -34,39 +50,49 @@ import { formatDuration, formatTime } from '../utils/time';
           <span>{{ train.stops.length }} 站</span>
         </div>
         <div class="stop-list">
-          <article class="stop-row" *ngFor="let stop of train.stops; let index = index">
-            <div class="stop-row__station">
-              <i></i>
-              <div>
-                <strong>{{ stationMap[stop.stationId]?.name || stop.stationId }}</strong>
-                <small>{{ stop.trackId.split('-').pop() }}道 · {{ stop.kind }}</small>
+          <article class="stop-card" *ngFor="let stop of train.stops; let index = index">
+            <div class="stop-card__main">
+              <div class="stop-row__station">
+                <i></i>
+                <div>
+                  <strong>{{ stationMap[stop.stationId]?.name || stop.stationId }}</strong>
+                  <small>{{ stop.trackId.split('-').pop() }}道 · {{ stop.kind }}</small>
+                </div>
               </div>
+              <div class="stop-row__times">
+                <span>{{ formatTime(stop.arrival) }}</span>
+                <span class="arrow">→</span>
+                <span>{{ formatTime(stop.departure) }}</span>
+              </div>
+              <p-select
+                [options]="stopKinds"
+                [(ngModel)]="stop.kind"
+                optionLabel="label"
+                optionValue="value"
+                (ngModelChange)="changeKind(stop, $event)"
+                size="small"
+                [ariaLabel]="'设置 ' + (stationMap[stop.stationId]?.name || '') + ' 作业方式'"
+              ></p-select>
+              <p-inputNumber
+                [(ngModel)]="stop.departure"
+                [min]="stop.arrival"
+                [max]="stop.arrival + 60"
+                [showButtons]="true"
+                buttonLayout="horizontal"
+                [step]="1"
+                (ngModelChange)="changeDeparture(stop, $event)"
+                size="small"
+                [ariaLabel]="'调整停站分钟'"
+              ></p-inputNumber>
             </div>
-            <div class="stop-row__times">
-              <span>{{ formatTime(stop.arrival) }}</span>
-              <span class="arrow">→</span>
-              <span>{{ formatTime(stop.departure) }}</span>
-            </div>
-            <p-select
-              [options]="stopKinds"
-              [(ngModel)]="stop.kind"
-              optionLabel="label"
-              optionValue="value"
-              (ngModelChange)="changeKind(stop, $event)"
-              size="small"
-              [ariaLabel]="'设置 ' + (stationMap[stop.stationId]?.name || '') + ' 作业方式'"
-            ></p-select>
-            <p-inputNumber
-              [(ngModel)]="stop.departure"
-              [min]="stop.arrival"
-              [max]="stop.arrival + 60"
-              [showButtons]="true"
-              buttonLayout="horizontal"
-              [step]="1"
-              (ngModelChange)="changeDeparture(stop, $event)"
-              size="small"
-              [ariaLabel]="'调整停站分钟'"
-            ></p-inputNumber>
+            <app-actual-report-form
+              class="stop-card__actual"
+              [stop]="stop"
+              [pending]="pendingFor(stop.stationId)"
+              [differences]="differencesFor(stop.stationId)"
+              (actualSubmit)="submitActual(stop, $event)"
+              (retry)="retryPending($event)"
+            ></app-actual-report-form>
           </article>
         </div>
       </div>
@@ -175,15 +201,19 @@ import { formatDuration, formatTime } from '../utils/time';
         gap: 7px;
       }
 
-      .stop-row {
+      .stop-card {
+        border: 1px solid #e1e6ed;
+        border-radius: 6px;
+        background: #fbfcfd;
+        overflow: hidden;
+      }
+
+      .stop-card__main {
         display: grid;
         grid-template-columns: minmax(110px, 1.35fr) 80px minmax(82px, 0.8fr) 108px;
         gap: 7px;
         align-items: center;
         padding: 8px;
-        border: 1px solid #e1e6ed;
-        border-radius: 6px;
-        background: #fbfcfd;
       }
 
       .stop-row__station {
@@ -269,8 +299,18 @@ import { formatDuration, formatTime } from '../utils/time';
 export class TrainInspectorComponent {
   @Input() train: Train | null = null;
   @Input() stations: Station[] = [];
+  @Input() pendingReports: PendingActualReport[] = [];
+  @Input() differences: ActualDifference[] = [];
   @Output() trainShifted = new EventEmitter<number>();
   @Output() stopUpdated = new EventEmitter<{ stationId: string; changes: Partial<TrainStop> }>();
+  @Output() actualSubmitted = new EventEmitter<{
+    trainId: string;
+    stationId: string;
+    actualArrival: number;
+    actualDeparture: number;
+    reporter: string;
+  }>();
+  @Output() pendingRetried = new EventEmitter<string>();
 
   readonly stopKinds: Array<{ label: string; value: StopKind }> = [
     { label: '停站', value: 'stop' },
@@ -292,6 +332,26 @@ export class TrainInspectorComponent {
 
   get shift(): EventEmitter<number> {
     return this.trainShifted;
+  }
+
+  pendingFor(stationId: string): PendingActualReport | null {
+    return this.pendingReports.find((report) => report.stationId === stationId) ?? null;
+  }
+
+  differencesFor(stationId: string): ActualDifference[] {
+    return this.differences.filter((difference) => difference.stationId === stationId);
+  }
+
+  submitActual(
+    stop: TrainStop,
+    value: { actualArrival: number; actualDeparture: number; reporter: string },
+  ): void {
+    if (!this.train) return;
+    this.actualSubmitted.emit({ trainId: this.train.id, stationId: stop.stationId, ...value });
+  }
+
+  retryPending(id: string): void {
+    this.pendingRetried.emit(id);
   }
 
   changeKind(stop: TrainStop, kind: StopKind): void {

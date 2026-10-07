@@ -79,7 +79,26 @@ export function createMockNetwork(): TrainNetwork {
   });
 
   applyMeetRelations(trains, stations);
+  applyDemoActuals(trains);
   return { lineName: '江海铁路调度台 · 北岭—终点南', stations, sections, trains };
+}
+
+/** 为部分列车补报实绩，演示「实绩口径」：已报站按实际到发，未报站兼容计划。 */
+function applyDemoActuals(trains: Train[]): void {
+  trains.forEach((train, trainIndex) => {
+    if (trainIndex % 3 !== 0) return;
+    train.stops.forEach((stop, stopIndex) => {
+      if (stopIndex > 3) return;
+      const delay = (trainIndex + stopIndex) % 5;
+      stop.actualArrival = stop.arrival + delay;
+      stop.actualDeparture = stop.departure + delay;
+      stop.actualBatch = 1;
+      stop.actualReporter = '值班台·张';
+      stop.actualReportedAt = `2026-10-07T0${6 + Math.floor(trainIndex / 10)}:${String(
+        (trainIndex * 7) % 60,
+      ).padStart(2, '0')}:00Z`;
+    });
+  });
 }
 
 interface BuildTrainInput {
@@ -213,6 +232,19 @@ export function updateStop(train: Train, stationId: string, changes: Partial<Tra
   };
 }
 
+/**
+ * 实绩口径：已上报实绩的车站按实际到发时刻，未上报则兼容计划时刻。
+ * reported 表示该站是否已登记实绩（用于界面标明「未上报」）。
+ */
+export function effectiveTimes(stop: TrainStop): { arrival: number; departure: number; reported: boolean } {
+  const reported = stop.actualArrival != null || stop.actualDeparture != null;
+  return {
+    arrival: stop.actualArrival ?? stop.arrival,
+    departure: stop.actualDeparture ?? stop.departure,
+    reported,
+  };
+}
+
 export function getSectionEndpoints(section: RailSection, network: TrainNetwork): [Station, Station] | null {
   const from = network.stations.find((station) => station.id === section.fromStationId);
   const to = network.stations.find((station) => station.id === section.toStationId);
@@ -223,26 +255,34 @@ export function computeConflicts(network: TrainNetwork, visibleTrainIds?: Set<st
   const conflicts: TimetableConflict[] = [];
   const stationMap = new Map(network.stations.map((station) => [station.id, station]));
   const sectionMap = new Map(network.sections.map((section) => [section.id, section]));
-  const stationOccupancy = new Map<string, Array<{ train: Train; stop: TrainStop }>>();
+  const stationOccupancy = new Map<
+    string,
+    Array<{ train: Train; stop: TrainStop; times: { arrival: number; departure: number; reported: boolean } }>
+  >();
 
   network.trains.forEach((train) => {
     if (visibleTrainIds && !visibleTrainIds.has(train.id)) return;
     train.stops.forEach((stop, stopIndex) => {
+      const stopTimes = effectiveTimes(stop);
       const key = `${stop.stationId}:${stop.trackId}`;
       const bucket = stationOccupancy.get(key) ?? [];
-      bucket.push({ train, stop });
+      bucket.push({ train, stop, times: stopTimes });
       stationOccupancy.set(key, bucket);
 
       const nextStop = train.stops[stopIndex + 1];
       if (!nextStop) return;
+      const nextTimes = effectiveTimes(nextStop);
       const section = network.sections.find(
         (candidate) =>
           (candidate.fromStationId === stop.stationId && candidate.toStationId === nextStop.stationId) ||
           (candidate.toStationId === stop.stationId && candidate.fromStationId === nextStop.stationId),
       );
       if (!section) return;
-      const departure = Math.min(stop.departure, nextStop.arrival);
-      const arrival = Math.max(stop.departure, nextStop.arrival);
+      // 实绩口径：已上报实绩按实际到发，未上报兼容计划时刻。
+      const departure = Math.min(stopTimes.departure, nextTimes.arrival);
+      const arrival = Math.max(stopTimes.departure, nextTimes.arrival);
+      const sectionBasis: 'planned' | 'actual' =
+        stopTimes.reported || nextTimes.reported ? 'actual' : 'planned';
       const peers = network.trains.filter(
         (candidate) =>
           candidate.id !== train.id &&
@@ -257,8 +297,12 @@ export function computeConflicts(network: TrainNetwork, visibleTrainIds?: Set<st
         const peerStart = peer.stops.find((item) => item.stationId === stop.stationId);
         const peerEnd = peer.stops.find((item) => item.stationId === nextStop.stationId);
         if (!peerStart || !peerEnd) return;
-        const peerDeparture = Math.min(peerStart.departure, peerEnd.arrival);
-        const peerArrival = Math.max(peerStart.departure, peerEnd.arrival);
+        const peerStartTimes = effectiveTimes(peerStart);
+        const peerEndTimes = effectiveTimes(peerEnd);
+        const peerDeparture = Math.min(peerStartTimes.departure, peerEndTimes.arrival);
+        const peerArrival = Math.max(peerStartTimes.departure, peerEndTimes.arrival);
+        const peerBasis: 'planned' | 'actual' =
+          peerStartTimes.reported || peerEndTimes.reported ? 'actual' : 'planned';
         const gap = Math.abs(peerDeparture - departure);
         if (gap < section.minHeadwayMin) {
           conflicts.push({
@@ -274,6 +318,7 @@ export function computeConflicts(network: TrainNetwork, visibleTrainIds?: Set<st
               start: Math.max(1, section.minHeadwayMin - gap),
               end: Math.max(4, section.minHeadwayMin - gap + 10),
             },
+            basis: sectionBasis === 'actual' || peerBasis === 'actual' ? 'actual' : 'planned',
           });
         }
 
@@ -293,6 +338,7 @@ export function computeConflicts(network: TrainNetwork, visibleTrainIds?: Set<st
             sectionId: section.id,
             timeRange: { start: departure, end: arrival },
             suggestedShift: { start: 2, end: 12 },
+            basis: sectionBasis === 'actual' || peerBasis === 'actual' ? 'actual' : 'planned',
           });
         }
       });
@@ -300,11 +346,11 @@ export function computeConflicts(network: TrainNetwork, visibleTrainIds?: Set<st
   });
 
   stationOccupancy.forEach((occupants, key) => {
-    occupants.sort((a, b) => a.stop.arrival - b.stop.arrival);
+    occupants.sort((a, b) => a.times.arrival - b.times.arrival);
     for (let index = 1; index < occupants.length; index += 1) {
       const previous = occupants[index - 1];
       const current = occupants[index];
-      const gap = current.stop.arrival - previous.stop.departure;
+      const gap = current.times.arrival - previous.times.departure;
       if (gap < 2) {
         const [stationId, trackId] = key.split(':');
         const station = stationMap.get(stationId);
@@ -318,10 +364,11 @@ export function computeConflicts(network: TrainNetwork, visibleTrainIds?: Set<st
           trainIds: [previous.train.id, current.train.id],
           stationId,
           timeRange: {
-            start: Math.min(previous.stop.arrival, current.stop.arrival),
-            end: Math.max(previous.stop.departure, current.stop.departure),
+            start: Math.min(previous.times.arrival, current.times.arrival),
+            end: Math.max(previous.times.departure, current.times.departure),
           },
           suggestedShift: { start: Math.max(1, 2 - gap), end: Math.max(5, 8 - gap) },
+          basis: current.times.reported || previous.times.reported ? 'actual' : 'planned',
         });
       }
     }
