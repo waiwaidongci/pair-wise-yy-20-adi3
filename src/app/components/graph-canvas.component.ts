@@ -17,11 +17,10 @@ import {
   TimetableConflict,
   Train,
   TrainNetwork,
-  TrainStop,
   ViewportState,
 } from '../types/timetable';
 import { formatTime } from '../utils/time';
-import { computeConflicts, visibleTimeRange } from '../utils/timetable-utils';
+import { effectiveArrival, effectiveDeparture, hasActualReport, visibleTimeRange } from '../utils/timetable-utils';
 
 interface Point {
   x: number;
@@ -287,10 +286,11 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
         if (from && to) {
           minKm = Math.min(from.km, to.km) - 4;
           maxKm = Math.max(from.km, to.km) + 4;
+          // 区间打印按实绩口径取时间窗：已上报用实际到发，未上报按计划
           const times = this.network.trains.flatMap((train) => {
             const fromStop = train.stops.find((stop) => stop.stationId === from.id);
             const toStop = train.stops.find((stop) => stop.stationId === to.id);
-            return fromStop && toStop ? [fromStop.departure, toStop.arrival] : [];
+            return fromStop && toStop ? [effectiveDeparture(fromStop), effectiveArrival(toStop)] : [];
           });
           if (times.length > 0) {
             minTime = Math.min(...times) - 4;
@@ -457,12 +457,15 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
     geometry: ReturnType<GraphCanvasComponent['getGeometry']>,
   ): void {
     this.hitPoints.clear();
+    const printing = !!this.printSectionId;
     const segmentIndex = new Map<string, Array<{ train: Train; departure: number; arrival: number }>>();
-    const stationMap = new Map(this.network.stations.map((station) => [station.id, station]));
+    const stopIndexes = new Map<string, number[]>();
     this.trains.forEach((train) => {
-      const points = this.buildPoints(train, geometry);
-      this.hitPoints.set(train.id, points);
-      for (let index = 0; index < points.length - 1; index += 1) {
+      // 打印（区间打印）按实绩口径画线；编辑态画计划线，实绩以虚线叠加
+      const built = this.buildPoints(train, geometry, printing);
+      this.hitPoints.set(train.id, built.points);
+      stopIndexes.set(train.id, built.stopPointIndex);
+      for (let index = 0; index < train.stops.length - 1; index += 1) {
         const stop = train.stops[index];
         const next = train.stops[index + 1];
         if (!stop || !next) continue;
@@ -474,12 +477,12 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
           train,
           departure:
             train.id === this.draggingTrainId
-              ? Math.min(stop.departure, next.arrival) + this.dragDelta
-              : Math.min(stop.departure, next.arrival),
+              ? Math.min(effectiveDeparture(stop), effectiveArrival(next)) + this.dragDelta
+              : Math.min(effectiveDeparture(stop), effectiveArrival(next)),
           arrival:
             train.id === this.draggingTrainId
-              ? Math.max(stop.departure, next.arrival) + this.dragDelta
-              : Math.max(stop.departure, next.arrival),
+              ? Math.max(effectiveDeparture(stop), effectiveArrival(next)) + this.dragDelta
+              : Math.max(effectiveDeparture(stop), effectiveArrival(next)),
         });
         segmentIndex.set(key, bucket);
       }
@@ -500,7 +503,9 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
         if (!next) return;
         const section = this.findSection(stop.stationId, next.stationId);
         if (!section) return;
-        const departure = Math.min(stop.departure, next.arrival) + (train.id === this.draggingTrainId ? this.dragDelta : 0);
+        const departure =
+          Math.min(effectiveDeparture(stop), effectiveArrival(next)) +
+          (train.id === this.draggingTrainId ? this.dragDelta : 0);
         const peers = segmentIndex.get(`${section.id}:${train.direction}`) ?? [];
         if (peers.some((peer) => peer.train.id !== train.id && Math.abs(peer.departure - departure) < section.minHeadwayMin)) {
           trainSegmentConflicts.add(section.id);
@@ -519,13 +524,31 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
       });
       context.stroke();
 
+      // 实绩叠加：已上报车站的实际到发连成深色虚线（拖动计划时实绩保持原位）
+      if (!printing && train.stops.some(hasActualReport)) {
+        const actualPoints = this.buildPoints(train, geometry, true, false).points;
+        context.save();
+        context.setLineDash([5, 4]);
+        context.strokeStyle = '#17324d';
+        context.globalAlpha = 0.8;
+        context.lineWidth = selected ? 2.6 : 1.7;
+        context.beginPath();
+        actualPoints.forEach((point, index) => {
+          if (index === 0) context.moveTo(point.x, point.y);
+          else context.lineTo(point.x, point.y);
+        });
+        context.stroke();
+        context.restore();
+      }
+
       train.stops.slice(0, -1).forEach((stop, index) => {
         const next = train.stops[index + 1];
         if (!next) return;
         const section = this.findSection(stop.stationId, next.stationId);
         if (!section || !trainSegmentConflicts.has(section.id)) return;
-        const first = points[index];
-        const second = points[index + 1];
+        const indexes = stopIndexes.get(train.id) ?? [];
+        const first = points[indexes[index]];
+        const second = points[indexes[index + 1]];
         if (!first || !second) return;
         context.strokeStyle = '#d92d3f';
         context.lineWidth = selected ? 5.5 : 3.5;
@@ -577,41 +600,35 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
   private buildPoints(
     train: Train,
     geometry: ReturnType<GraphCanvasComponent['getGeometry']>,
-  ): Point[] {
+    useActual = false,
+    applyDrag = true,
+  ): { points: Point[]; stopPointIndex: number[] } {
     const stationMap = new Map(this.network.stations.map((station) => [station.id, station]));
-    const delta = train.id === this.draggingTrainId ? this.dragDelta : 0;
+    const delta = applyDrag && train.id === this.draggingTrainId ? this.dragDelta : 0;
     const points: Point[] = [];
+    const stopPointIndex: number[] = [];
     train.stops.forEach((stop, index) => {
       const station = stationMap.get(stop.stationId);
       if (!station) return;
-      const previous = train.stops[index - 1];
-      const previousStation = previous ? stationMap.get(previous.stationId) : null;
-      if (previousStation) {
-        const arrivalPoint = {
-          x: this.timeToX(stop.arrival + delta, geometry),
-          y: this.kmToY(station.km, geometry),
-          time: stop.arrival + delta,
-          km: station.km,
-        };
-        points.push(arrivalPoint);
-      } else {
+      const arrival = useActual ? effectiveArrival(stop) : stop.arrival;
+      const departure = useActual ? effectiveDeparture(stop) : stop.departure;
+      stopPointIndex[index] = points.length;
+      points.push({
+        x: this.timeToX(arrival + delta, geometry),
+        y: this.kmToY(station.km, geometry),
+        time: arrival + delta,
+        km: station.km,
+      });
+      if (stop.kind !== 'pass' && Math.abs(departure - arrival) > 0.01) {
         points.push({
-          x: this.timeToX(stop.arrival + delta, geometry),
+          x: this.timeToX(departure + delta, geometry),
           y: this.kmToY(station.km, geometry),
-          time: stop.arrival + delta,
-          km: station.km,
-        });
-      }
-      if (stop.kind !== 'pass' && Math.abs(stop.departure - stop.arrival) > 0.01) {
-        points.push({
-          x: this.timeToX(stop.departure + delta, geometry),
-          y: this.kmToY(station.km, geometry),
-          time: stop.departure + delta,
+          time: departure + delta,
           km: station.km,
         });
       }
     });
-    return points;
+    return { points, stopPointIndex };
   }
 
   private drawAxis(
@@ -628,13 +645,13 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
     context.fillStyle = '#17324d';
     context.font = '700 16px "Noto Sans SC", sans-serif';
     context.textAlign = 'left';
-    context.fillText(`${from?.name ?? ''}—${to?.name ?? ''} 区间运行图`, geometry.left, 26);
+    context.fillText(`${from?.name ?? ''}—${to?.name ?? ''} 区间运行图（实绩口径）`, geometry.left, 26);
     context.font = '11px "Noto Sans SC", sans-serif';
     context.textAlign = 'right';
     context.fillStyle = '#667085';
     context.fillText(`追踪间隔 ≥ ${section.minHeadwayMin} 分 · ${section.distanceKm.toFixed(1)} km`, width - 28, 26);
     context.textAlign = 'left';
-    context.fillText('铁路调度运行图系统 · 打印件', 24, height - 9);
+    context.fillText('铁路调度运行图系统 · 打印件 · 已上报车站按实际到发，未上报按计划时刻', 24, height - 9);
   }
 
   private findHitTrain(x: number, y: number): string | null {

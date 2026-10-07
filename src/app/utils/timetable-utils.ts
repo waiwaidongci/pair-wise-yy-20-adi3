@@ -1,4 +1,6 @@
 import {
+  ActualDiscrepancy,
+  ActualReportBatch,
   ImportedNetworkFile,
   RailSection,
   Station,
@@ -206,6 +208,132 @@ export function shiftTrain(train: Train, deltaMinutes: number): Train {
   };
 }
 
+/** 该站是否已有确认的实绩到发 */
+export function hasActualReport(stop: TrainStop): boolean {
+  return stop.actualArrival != null || stop.actualDeparture != null;
+}
+
+/** 实绩口径到达时刻：已上报用实绩，未上报按计划 */
+export function effectiveArrival(stop: TrainStop): number {
+  return stop.actualArrival ?? stop.arrival;
+}
+
+/** 实绩口径发车时刻：已上报用实绩，未上报按计划 */
+export function effectiveDeparture(stop: TrainStop): number {
+  return stop.actualDeparture ?? stop.departure;
+}
+
+export interface ActualBatchOutcome {
+  trains: Train[];
+  confirmed: number;
+  corrected: number;
+  stale: number;
+  invalid: number;
+  discrepancies: ActualDiscrepancy[];
+}
+
+/**
+ * 把一个上报批次落到运行线上（纯函数，reducer 调用）。
+ * 规则：
+ * - 无实绩的站直接确认；
+ * - 批次序号更新（更大）则更正既有实绩；
+ * - 序号相同（两位值班员同时提交）先到生效，后到的不同值保留为差异；
+ * - 序号更小的晚到旧批次不倒退已确认结论。
+ */
+export function applyActualBatch(network: TrainNetwork, batch: ActualReportBatch): ActualBatchOutcome {
+  const outcome: ActualBatchOutcome = {
+    trains: network.trains,
+    confirmed: 0,
+    corrected: 0,
+    stale: 0,
+    invalid: 0,
+    discrepancies: [],
+  };
+  const entriesByTrain = new Map<string, ActualReportBatch['entries']>();
+  batch.entries.forEach((entry) => {
+    const bucket = entriesByTrain.get(entry.trainId) ?? [];
+    bucket.push(entry);
+    entriesByTrain.set(entry.trainId, bucket);
+  });
+
+  outcome.trains = network.trains.map((train) => {
+    const entries = entriesByTrain.get(train.id);
+    if (!entries || entries.length === 0) return train;
+    const matched = new Set<string>();
+    let changed = false;
+    const stops = train.stops.map((stop) => {
+      const entry = entries.find((candidate) => candidate.stationId === stop.stationId);
+      if (!entry) return stop;
+      matched.add(stop.stationId);
+      if (entry.actualArrival == null && entry.actualDeparture == null) {
+        outcome.invalid += 1;
+        return stop;
+      }
+      const next: TrainStop = {
+        ...stop,
+        // 只登记本批次真正上报的字段，未上报的保持原值（显示层再回退计划值）
+        actualArrival: entry.actualArrival ?? stop.actualArrival,
+        actualDeparture: entry.actualDeparture ?? stop.actualDeparture,
+        actualBatchId: batch.batchId,
+        actualSequence: batch.sequence,
+        actualOperator: batch.operator,
+        actualReportedAt: batch.submittedAt,
+      };
+      if (!hasActualReport(stop)) {
+        outcome.confirmed += 1;
+        changed = true;
+        return next;
+      }
+      const currentSequence = stop.actualSequence ?? Number.MIN_SAFE_INTEGER;
+      if (batch.sequence > currentSequence) {
+        outcome.corrected += 1;
+        changed = true;
+        return next;
+      }
+      if (batch.sequence === currentSequence && stop.actualBatchId !== batch.batchId) {
+        const differs =
+          (entry.actualArrival != null && entry.actualArrival !== (stop.actualArrival ?? null)) ||
+          (entry.actualDeparture != null && entry.actualDeparture !== (stop.actualDeparture ?? null));
+        if (differs) {
+          outcome.discrepancies.push({
+            id: `${batch.batchId}:${train.id}:${stop.stationId}`,
+            trainId: train.id,
+            stationId: stop.stationId,
+            kept: {
+              actualArrival: stop.actualArrival,
+              actualDeparture: stop.actualDeparture,
+              operator: stop.actualOperator ?? '—',
+              batchId: stop.actualBatchId ?? '—',
+              sequence: currentSequence,
+            },
+            incoming: {
+              actualArrival: entry.actualArrival,
+              actualDeparture: entry.actualDeparture,
+              operator: batch.operator,
+              batchId: batch.batchId,
+              sequence: batch.sequence,
+            },
+            recordedAt: batch.submittedAt,
+          });
+        }
+        return stop;
+      }
+      outcome.stale += 1;
+      return stop;
+    });
+    entries.forEach((entry) => {
+      if (!matched.has(entry.stationId)) outcome.invalid += 1;
+    });
+    return changed ? { ...train, stops } : train;
+  });
+
+  const knownTrainIds = new Set(network.trains.map((train) => train.id));
+  batch.entries.forEach((entry) => {
+    if (!knownTrainIds.has(entry.trainId)) outcome.invalid += 1;
+  });
+  return outcome;
+}
+
 export function updateStop(train: Train, stationId: string, changes: Partial<TrainStop>): Train {
   return {
     ...train,
@@ -220,6 +348,8 @@ export function getSectionEndpoints(section: RailSection, network: TrainNetwork)
 }
 
 export function computeConflicts(network: TrainNetwork, visibleTrainIds?: Set<string>): TimetableConflict[] {
+  // 实绩口径：已上报车站用实际到发，未上报按计划时刻；实绩更新后此处整体重算，
+  // 未受影响的列车时刻不变，其冲突结论自然保留。
   const conflicts: TimetableConflict[] = [];
   const stationMap = new Map(network.stations.map((station) => [station.id, station]));
   const sectionMap = new Map(network.sections.map((section) => [section.id, section]));
@@ -241,8 +371,8 @@ export function computeConflicts(network: TrainNetwork, visibleTrainIds?: Set<st
           (candidate.toStationId === stop.stationId && candidate.fromStationId === nextStop.stationId),
       );
       if (!section) return;
-      const departure = Math.min(stop.departure, nextStop.arrival);
-      const arrival = Math.max(stop.departure, nextStop.arrival);
+      const departure = Math.min(effectiveDeparture(stop), effectiveArrival(nextStop));
+      const arrival = Math.max(effectiveDeparture(stop), effectiveArrival(nextStop));
       const peers = network.trains.filter(
         (candidate) =>
           candidate.id !== train.id &&
@@ -257,8 +387,8 @@ export function computeConflicts(network: TrainNetwork, visibleTrainIds?: Set<st
         const peerStart = peer.stops.find((item) => item.stationId === stop.stationId);
         const peerEnd = peer.stops.find((item) => item.stationId === nextStop.stationId);
         if (!peerStart || !peerEnd) return;
-        const peerDeparture = Math.min(peerStart.departure, peerEnd.arrival);
-        const peerArrival = Math.max(peerStart.departure, peerEnd.arrival);
+        const peerDeparture = Math.min(effectiveDeparture(peerStart), effectiveArrival(peerEnd));
+        const peerArrival = Math.max(effectiveDeparture(peerStart), effectiveArrival(peerEnd));
         const gap = Math.abs(peerDeparture - departure);
         if (gap < section.minHeadwayMin) {
           conflicts.push({
@@ -300,11 +430,11 @@ export function computeConflicts(network: TrainNetwork, visibleTrainIds?: Set<st
   });
 
   stationOccupancy.forEach((occupants, key) => {
-    occupants.sort((a, b) => a.stop.arrival - b.stop.arrival);
+    occupants.sort((a, b) => effectiveArrival(a.stop) - effectiveArrival(b.stop));
     for (let index = 1; index < occupants.length; index += 1) {
       const previous = occupants[index - 1];
       const current = occupants[index];
-      const gap = current.stop.arrival - previous.stop.departure;
+      const gap = effectiveArrival(current.stop) - effectiveDeparture(previous.stop);
       if (gap < 2) {
         const [stationId, trackId] = key.split(':');
         const station = stationMap.get(stationId);
@@ -318,8 +448,8 @@ export function computeConflicts(network: TrainNetwork, visibleTrainIds?: Set<st
           trainIds: [previous.train.id, current.train.id],
           stationId,
           timeRange: {
-            start: Math.min(previous.stop.arrival, current.stop.arrival),
-            end: Math.max(previous.stop.departure, current.stop.departure),
+            start: Math.min(effectiveArrival(previous.stop), effectiveArrival(current.stop)),
+            end: Math.max(effectiveDeparture(previous.stop), effectiveDeparture(current.stop)),
           },
           suggestedShift: { start: Math.max(1, 2 - gap), end: Math.max(5, 8 - gap) },
         });
@@ -334,7 +464,9 @@ export function computeConflicts(network: TrainNetwork, visibleTrainIds?: Set<st
 }
 
 export function visibleTimeRange(network: TrainNetwork): [number, number] {
-  const times = network.trains.flatMap((train) => train.stops.flatMap((stop) => [stop.arrival, stop.departure]));
+  const times = network.trains.flatMap((train) =>
+    train.stops.flatMap((stop) => [effectiveArrival(stop), effectiveDeparture(stop)]),
+  );
   if (times.length === 0) return [0, 1440];
   return [Math.min(...times) - 10, Math.max(...times) + 10];
 }

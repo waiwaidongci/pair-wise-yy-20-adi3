@@ -1,6 +1,6 @@
 import { createFeatureSelector, createSelector } from '@ngrx/store';
 import { TimetableState } from '../types/timetable';
-import { computeConflicts, filterTrains } from '../utils/timetable-utils';
+import { computeConflicts, filterTrains, hasActualReport } from '../utils/timetable-utils';
 
 export const selectTimetableState = createFeatureSelector<TimetableState>('timetable');
 
@@ -11,6 +11,26 @@ export const selectSelectedTrainId = createSelector(selectTimetableState, (state
 export const selectBatchSelection = createSelector(selectTimetableState, (state) => state.batchSelection);
 export const selectPrintSectionId = createSelector(selectTimetableState, (state) => state.printSectionId);
 export const selectNotices = createSelector(selectTimetableState, (state) => state.notices);
+export const selectActuals = createSelector(selectTimetableState, (state) => state.actuals);
+export const selectPendingReports = createSelector(selectActuals, (actuals) => actuals.pending);
+export const selectDiscrepancies = createSelector(selectActuals, (actuals) => actuals.discrepancies);
+
+export const selectActualStats = createSelector(selectNetwork, selectActuals, (network, actuals) => {
+  let reportedStops = 0;
+  let totalStops = 0;
+  network.trains.forEach((train) => {
+    train.stops.forEach((stop) => {
+      totalStops += 1;
+      if (hasActualReport(stop)) reportedStops += 1;
+    });
+  });
+  return {
+    reportedStops,
+    totalStops,
+    pendingCount: actuals.pending.length,
+    discrepancyCount: actuals.discrepancies.length,
+  };
+});
 
 export const selectVisibleTrains = createSelector(
   selectNetwork,

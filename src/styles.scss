@@ -248,6 +248,14 @@ main {
   font-size: 13px;
 }
 
+.summary-item--clickable {
+  cursor: pointer;
+}
+
+.summary-item--clickable:hover strong {
+  color: #1f6fa9;
+}
+
 .danger {
   color: #c92734 !important;
 }
@@ -368,6 +376,13 @@ main {
   background: #2563eb;
 }
 
+.legend-actual {
+  display: inline-block;
+  width: 16px;
+  height: 0;
+  border-top: 2px dashed #17324d;
+}
+
 .legend-stop {
   width: 7px;
   height: 7px;
@@ -482,6 +497,15 @@ main {
   margin: 5px 0 6px;
   color: #153650;
   font-size: 24px;
+}
+
+.analysis-header h1 p-tag {
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.caliber-note {
+  color: #9aa7b6;
 }
 
 .analysis-header p {

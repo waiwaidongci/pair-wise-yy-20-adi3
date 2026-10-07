@@ -18,6 +18,7 @@ import { SelectModule } from 'primeng/select';
 import { TagModule } from 'primeng/tag';
 import { TooltipModule } from 'primeng/tooltip';
 import { combineLatest, map } from 'rxjs';
+import { ActualsDialogComponent } from '../components/actuals-dialog.component';
 import { ConflictPanelComponent } from '../components/conflict-panel.component';
 import { GraphCanvasComponent } from '../components/graph-canvas.component';
 import { TrainInspectorComponent } from '../components/train-inspector.component';
@@ -36,6 +37,7 @@ import {
   updateViewport,
 } from '../stores/timetable.actions';
 import {
+  selectActualStats,
   selectBatchSelection,
   selectConflictSummary,
   selectConflicts,
@@ -68,6 +70,7 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
     SelectModule,
     TagModule,
     TooltipModule,
+    ActualsDialogComponent,
     GraphCanvasComponent,
     TrainInspectorComponent,
     ConflictPanelComponent,
@@ -138,6 +141,13 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
             ></p-button>
             <span class="toolbar__divider"></span>
             <p-button
+              icon="pi pi-inbox"
+              [label]="vm.actualStats.pendingCount > 0 ? '实绩上报 (' + vm.actualStats.pendingCount + ')' : '实绩上报'"
+              [severity]="vm.actualStats.pendingCount > 0 ? 'warn' : 'secondary'"
+              size="small"
+              (onClick)="actualsDialog = true"
+            ></p-button>
+            <p-button
               icon="pi pi-upload"
               label="导入 JSON"
               severity="secondary"
@@ -174,6 +184,25 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
             <i class="pi pi-arrow-right-arrow-left"></i>
             <span>越行风险</span>
             <strong>{{ vm.summary.overtake }}</strong>
+          </div>
+          <div class="summary-item summary-item--clickable" (click)="actualsDialog = true">
+            <i class="pi pi-check-square"></i>
+            <span>实绩已报</span>
+            <strong>{{ vm.actualStats.reportedStops }}</strong>
+          </div>
+          <div
+            class="summary-item summary-item--clickable"
+            *ngIf="vm.actualStats.pendingCount > 0"
+            (click)="actualsDialog = true"
+          >
+            <i class="pi pi-exclamation-circle"></i>
+            <span>待补交</span>
+            <strong class="danger">{{ vm.actualStats.pendingCount }}</strong>
+          </div>
+          <div class="summary-item" *ngIf="vm.actualStats.discrepancyCount > 0">
+            <i class="pi pi-clone"></i>
+            <span>上报差异</span>
+            <strong class="warning">{{ vm.actualStats.discrepancyCount }}</strong>
           </div>
           <div class="summary-bar__spacer"></div>
           <div class="batch-control">
@@ -239,6 +268,7 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
               </div>
               <div class="legend">
                 <span><i class="legend-line"></i>运行线</span>
+                <span><i class="legend-actual"></i>实绩线</span>
                 <span><i class="legend-stop"></i>停站</span>
                 <span><i class="legend-danger"></i>冲突</span>
               </div>
@@ -309,6 +339,8 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
           <p-button label="取消" severity="secondary" (onClick)="importDialog = false"></p-button>
         </ng-template>
       </p-dialog>
+
+      <app-actuals-dialog [(visible)]="actualsDialog"></app-actuals-dialog>
     </ng-container>
   `,
 })
@@ -332,6 +364,7 @@ export class TimetableEditorPageComponent implements OnInit {
   batchMinutes = 5;
   printSectionId: string | null = null;
   importDialog = false;
+  actualsDialog = false;
 
   readonly viewModel$ = combineLatest({
     network: this.store.select(selectNetwork),
@@ -346,6 +379,7 @@ export class TimetableEditorPageComponent implements OnInit {
     summary: this.store.select(selectConflictSummary),
     printSectionId: this.store.select(selectPrintSectionId),
     notices: this.store.select(selectNotices),
+    actualStats: this.store.select(selectActualStats),
   }).pipe(map((state) => state));
 
   ngOnInit(): void {

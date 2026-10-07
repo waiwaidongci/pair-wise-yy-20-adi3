@@ -1,8 +1,10 @@
 import { AsyncPipe } from '@angular/common';
-import { Component, inject } from '@angular/core';
+import { Component, inject, OnInit } from '@angular/core';
 import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { Store } from '@ngrx/store';
 import { selectConflictSummary, selectNetwork } from './stores/timetable.selectors';
+import { restorePersistedActuals } from './stores/timetable.actions';
+import { readPersistedActuals } from './stores/actuals-persistence';
 import { ButtonModule } from 'primeng/button';
 
 @Component({
@@ -33,8 +35,15 @@ import { ButtonModule } from 'primeng/button';
     </div>
   `,
 })
-export class AppComponent {
+export class AppComponent implements OnInit {
   private readonly store = inject(Store);
   readonly network$ = this.store.select(selectNetwork);
   readonly summary$ = this.store.select(selectConflictSummary);
+
+  ngOnInit(): void {
+    const persisted = readPersistedActuals();
+    if (persisted) {
+      this.store.dispatch(restorePersistedActuals({ persisted }));
+    }
+  }
 }

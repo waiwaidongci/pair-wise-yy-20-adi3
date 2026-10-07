@@ -7,7 +7,7 @@ import { SelectModule } from 'primeng/select';
 import { TableModule } from 'primeng/table';
 import { TagModule } from 'primeng/tag';
 import { combineLatest, map } from 'rxjs';
-import { selectConflicts, selectNetwork } from '../stores/timetable.selectors';
+import { selectActualStats, selectConflicts, selectNetwork } from '../stores/timetable.selectors';
 import { ConflictType, TimetableConflict } from '../types/timetable';
 import { formatTime } from '../utils/time';
 
@@ -21,13 +21,14 @@ import { formatTime } from '../utils/time';
       <header class="analysis-header">
         <div>
           <span>安全分析中心</span>
-          <h1>冲突明细与调整窗口</h1>
-          <p>按具体区间、车站和列车列出冲突原因，并给出可执行的时间调整范围。</p>
+          <h1>冲突明细与调整窗口 <p-tag value="实绩口径" severity="info"></p-tag></h1>
+          <p>按实绩口径计算：已上报车站用实际到发，未上报按计划时刻；实绩更新后相关结论即时重算。</p>
         </div>
         <div class="analysis-kpis">
           <div><small>严重</small><strong class="danger">{{ vm.danger }}</strong></div>
           <div><small>警告</small><strong class="warning">{{ vm.warning }}</strong></div>
           <div><small>冲突总数</small><strong>{{ vm.conflicts.length }}</strong></div>
+          <div><small>实绩已报站次</small><strong>{{ vm.actualStats.reportedStops }}</strong></div>
         </div>
       </header>
 
@@ -41,6 +42,7 @@ import { formatTime } from '../utils/time';
           size="small"
         ></p-select>
         <span>共 {{ filteredConflicts(vm.conflicts).length }} 条，点击行可定位到列车</span>
+        <span class="caliber-note">未上报车站按计划值参与追踪间隔、越行与股道占用计算</span>
         <div class="spacer"></div>
         <p-button icon="pi pi-download" label="导出分析 CSV" size="small" (onClick)="exportCsv(vm.conflicts)"></p-button>
       </div>
@@ -106,10 +108,12 @@ export class ConflictAnalysisPageComponent {
   readonly viewModel$ = combineLatest({
     conflicts: this.store.select(selectConflicts),
     network: this.store.select(selectNetwork),
+    actualStats: this.store.select(selectActualStats),
   }).pipe(
-    map(({ conflicts, network }) => ({
+    map(({ conflicts, network, actualStats }) => ({
       conflicts,
       network,
+      actualStats,
       danger: conflicts.filter((conflict) => conflict.severity === 'danger').length,
       warning: conflicts.filter((conflict) => conflict.severity === 'warning').length,
     })),

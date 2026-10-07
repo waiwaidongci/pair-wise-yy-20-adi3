@@ -7,6 +7,7 @@ import { SelectModule } from 'primeng/select';
 import { TooltipModule } from 'primeng/tooltip';
 import { Station, StopKind, Train, TrainStop } from '../types/timetable';
 import { formatDuration, formatTime } from '../utils/time';
+import { hasActualReport } from '../utils/timetable-utils';
 
 @Component({
   selector: 'app-train-inspector',
@@ -46,6 +47,22 @@ import { formatDuration, formatTime } from '../utils/time';
               <span>{{ formatTime(stop.arrival) }}</span>
               <span class="arrow">→</span>
               <span>{{ formatTime(stop.departure) }}</span>
+              <div
+                class="actual-line"
+                *ngIf="hasActual(stop); else missingActual"
+                [pTooltip]="
+                  '批次序号 ' + (stop.actualSequence ?? '—') + ' · ' + (stop.actualOperator ?? '—')
+                "
+                tooltipPosition="top"
+              >
+                实 {{ formatTime(stop.actualArrival ?? stop.arrival) }}→{{
+                  formatTime(stop.actualDeparture ?? stop.departure)
+                }}
+                <em *ngIf="lateBy(stop) > 0">晚{{ lateBy(stop) }}分</em>
+              </div>
+              <ng-template #missingActual>
+                <div class="actual-line actual-line--missing">未上报 · 按计划</div>
+              </ng-template>
             </div>
             <p-select
               [options]="stopKinds"
@@ -219,10 +236,30 @@ import { formatDuration, formatTime } from '../utils/time';
 
       .stop-row__times {
         display: flex;
+        flex-wrap: wrap;
         justify-content: space-between;
         color: #344b63;
         font-size: 11px;
         font-variant-numeric: tabular-nums;
+      }
+
+      .actual-line {
+        flex-basis: 100%;
+        margin-top: 3px;
+        color: #0f5a8a;
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .actual-line em {
+        margin-left: 4px;
+        color: #c92734;
+        font-style: normal;
+        font-weight: 700;
+      }
+
+      .actual-line--missing {
+        color: #9aa7b6;
       }
 
       .arrow {
@@ -297,6 +334,14 @@ export class TrainInspectorComponent {
   changeKind(stop: TrainStop, kind: StopKind): void {
     stop.kind = kind;
     this.stopUpdated.emit({ stationId: stop.stationId, changes: { kind } });
+  }
+
+  hasActual(stop: TrainStop): boolean {
+    return hasActualReport(stop);
+  }
+
+  lateBy(stop: TrainStop): number {
+    return Math.max(0, Math.round((stop.actualDeparture ?? stop.departure) - stop.departure));
   }
 
   changeDeparture(stop: TrainStop, departure: number | null): void {
